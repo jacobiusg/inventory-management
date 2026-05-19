@@ -1,8 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
+from datetime import date, timedelta
+from uuid import uuid4
 from pydantic import BaseModel
 from mock_data import inventory_items, orders, demand_forecasts, backlog_items, spending_summary, monthly_spending, category_spending, recent_transactions, purchase_orders
+import db
+import lead_times
+
+# Fallback unit cost for demand-forecast SKUs not present in inventory.json.
+# The demo data set has overlapping SKUs for only ~1/9 forecast items;
+# without this default the recommendation engine would return almost nothing.
+DEFAULT_FALLBACK_UNIT_COST = 50.0
+DEFAULT_FALLBACK_CATEGORY = "Components"
 
 app = FastAPI(title="Factory Inventory Management System")
 
@@ -103,7 +113,7 @@ class BacklogItem(BaseModel):
 
 class PurchaseOrder(BaseModel):
     id: str
-    backlog_item_id: str
+    backlog_item_id: Optional[str] = None
     supplier_name: str
     quantity: int
     unit_cost: float
@@ -119,6 +129,112 @@ class CreatePurchaseOrderRequest(BaseModel):
     unit_cost: float
     expected_delivery_date: str
     notes: Optional[str] = None
+
+class RestockingLineItem(BaseModel):
+    sku: str
+    name: str
+    category: str
+    unit_cost: float
+    on_hand: int
+    forecasted_demand: int
+    trend: str
+    recommended_quantity: int
+    line_total: float
+
+class RestockingRecommendationResponse(BaseModel):
+    budget: float
+    total_cost: float
+    remaining_budget: float
+    items: List[RestockingLineItem]
+
+class RestockingOrderItem(BaseModel):
+    sku: str
+    name: str
+    quantity: int
+    unit_cost: float
+
+class CreateRestockingOrderRequest(BaseModel):
+    supplier_name: str
+    category: str
+    items: List[RestockingOrderItem]
+    notes: Optional[str] = None
+
+class SubmittedPurchaseOrder(BaseModel):
+    id: str
+    supplier_name: str
+    items: List[dict]
+    total_cost: float
+    category: str
+    lead_time_days: int
+    created_date: str
+    expected_delivery_date: str
+    status: str
+    notes: Optional[str] = None
+
+@app.on_event("startup")
+def _startup():
+    db.init_db()
+
+def _recommend_restocking(budget: float) -> RestockingRecommendationResponse:
+    """Greedy fit: pick demand-forecast SKUs ordered by trend (increasing first)
+    then by shortfall, filling the budget without exceeding it."""
+    inv_by_sku = {item["sku"]: item for item in inventory_items}
+
+    candidates = []
+    for forecast in demand_forecasts:
+        sku = forecast["item_sku"]
+        inv = inv_by_sku.get(sku)
+        unit_cost = inv["unit_cost"] if inv else DEFAULT_FALLBACK_UNIT_COST
+        category = inv["category"] if inv else DEFAULT_FALLBACK_CATEGORY
+        on_hand = inv["quantity_on_hand"] if inv else 0
+        shortfall = max(0, forecast["forecasted_demand"] - on_hand)
+        if shortfall == 0 or unit_cost <= 0:
+            continue
+        candidates.append({
+            "sku": sku,
+            "name": forecast["item_name"],
+            "category": category,
+            "unit_cost": unit_cost,
+            "on_hand": on_hand,
+            "forecasted_demand": forecast["forecasted_demand"],
+            "trend": forecast["trend"],
+            "shortfall": shortfall,
+        })
+
+    # Prioritize increasing-trend items, then largest shortfall.
+    trend_rank = {"increasing": 0, "stable": 1, "decreasing": 2}
+    candidates.sort(key=lambda c: (trend_rank.get(c["trend"], 3), -c["shortfall"]))
+
+    line_items: list[RestockingLineItem] = []
+    remaining = budget
+    for c in candidates:
+        max_affordable = int(remaining // c["unit_cost"])
+        if max_affordable <= 0:
+            continue
+        qty = min(c["shortfall"], max_affordable)
+        if qty <= 0:
+            continue
+        line_total = round(qty * c["unit_cost"], 2)
+        line_items.append(RestockingLineItem(
+            sku=c["sku"],
+            name=c["name"],
+            category=c["category"],
+            unit_cost=c["unit_cost"],
+            on_hand=c["on_hand"],
+            forecasted_demand=c["forecasted_demand"],
+            trend=c["trend"],
+            recommended_quantity=qty,
+            line_total=line_total,
+        ))
+        remaining -= line_total
+
+    total_cost = round(budget - remaining, 2)
+    return RestockingRecommendationResponse(
+        budget=budget,
+        total_cost=total_cost,
+        remaining_budget=round(remaining, 2),
+        items=line_items,
+    )
 
 # API endpoints
 @app.get("/")
@@ -303,6 +419,40 @@ def get_monthly_trends():
     result = list(months.values())
     result.sort(key=lambda x: x['month'])
     return result
+
+@app.get("/api/restocking/recommendations", response_model=RestockingRecommendationResponse)
+def get_restocking_recommendations(budget: float):
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="budget must be positive")
+    return _recommend_restocking(budget)
+
+@app.post("/api/purchase-orders", response_model=SubmittedPurchaseOrder)
+def create_purchase_order(req: CreateRestockingOrderRequest):
+    if not req.items:
+        raise HTTPException(status_code=400, detail="at least one item is required")
+
+    lead_days = lead_times.lead_time_for(req.category)
+    today = date.today()
+    expected = today + timedelta(days=lead_days)
+    total_cost = round(sum(i.quantity * i.unit_cost for i in req.items), 2)
+    po = {
+        "id": f"PO-{uuid4().hex[:8].upper()}",
+        "supplier_name": req.supplier_name,
+        "items": [i.model_dump() for i in req.items],
+        "total_cost": total_cost,
+        "category": req.category,
+        "lead_time_days": lead_days,
+        "created_date": today.isoformat(),
+        "expected_delivery_date": expected.isoformat(),
+        "status": "Submitted",
+        "notes": req.notes,
+    }
+    db.insert_purchase_order(po)
+    return po
+
+@app.get("/api/purchase-orders", response_model=List[SubmittedPurchaseOrder])
+def get_submitted_purchase_orders():
+    return db.list_purchase_orders()
 
 if __name__ == "__main__":
     import uvicorn
