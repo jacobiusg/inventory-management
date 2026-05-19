@@ -82,64 +82,56 @@
 </template>
 
 <script>
-import { ref, onMounted, watch, computed } from 'vue'
+import { computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
+import { useFilteredResource } from '../composables/useFilteredResource'
 
 export default {
   name: 'Backlog',
   setup() {
-    const loading = ref(true)
-    const error = ref(null)
-    const allBacklogItems = ref([])
-    const inventoryItems = ref([])
-
     // Use shared filters
     const { selectedLocation, selectedCategory, getCurrentFilters } = useFilters()
 
+    // Load backlog + inventory together as one resource so the template's
+    // single loading/error state mirrors the original hand-rolled behavior.
+    const { data, loading, error } = useFilteredResource(
+      async () => {
+        const filters = getCurrentFilters()
+        try {
+          const [backlogData, inventoryData] = await Promise.all([
+            api.getBacklog(),
+            api.getInventory({
+              warehouse: filters.warehouse,
+              category: filters.category
+            })
+          ])
+          return { allBacklogItems: backlogData, inventoryItems: inventoryData }
+        } catch (err) {
+          // Preserve the original error-string shape surfaced to the template.
+          throw 'Failed to load backlog: ' + err.message
+        }
+      },
+      [selectedLocation, selectedCategory],
+      { allBacklogItems: [], inventoryItems: [] }
+    )
+
     // Filter backlog based on inventory filters
     const backlogItems = computed(() => {
+      const allBacklogItems = data.value?.allBacklogItems || []
+      const inventoryItems = data.value?.inventoryItems || []
       if (selectedLocation.value === 'all' && selectedCategory.value === 'all') {
-        return allBacklogItems.value
+        return allBacklogItems
       }
 
       // Get SKUs of items that match the filters
-      const validSkus = new Set(inventoryItems.value.map(item => item.sku))
-      return allBacklogItems.value.filter(b => validSkus.has(b.item_sku))
+      const validSkus = new Set(inventoryItems.map(item => item.sku))
+      return allBacklogItems.filter(b => validSkus.has(b.item_sku))
     })
-
-    const loadBacklog = async () => {
-      try {
-        loading.value = true
-        const filters = getCurrentFilters()
-
-        const [backlogData, inventoryData] = await Promise.all([
-          api.getBacklog(),
-          api.getInventory({
-            warehouse: filters.warehouse,
-            category: filters.category
-          })
-        ])
-
-        allBacklogItems.value = backlogData
-        inventoryItems.value = inventoryData
-      } catch (err) {
-        error.value = 'Failed to load backlog: ' + err.message
-      } finally {
-        loading.value = false
-      }
-    }
 
     const getBacklogByPriority = (priority) => {
       return backlogItems.value.filter(item => item.priority === priority)
     }
-
-    // Watch for filter changes and reload data
-    watch([selectedLocation, selectedCategory], () => {
-      loadBacklog()
-    })
-
-    onMounted(loadBacklog)
 
     return {
       loading,

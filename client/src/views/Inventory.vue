@@ -84,9 +84,10 @@
 </template>
 
 <script>
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
+import { useFilteredResource } from '../composables/useFilteredResource'
 import { useI18n } from '../composables/useI18n'
 import InventoryDetailModal from '../components/InventoryDetailModal.vue'
 
@@ -102,9 +103,6 @@ export default {
       return currentCurrency.value === 'JPY' ? '¥' : '$'
     })
 
-    const loading = ref(true)
-    const error = ref(null)
-    const items = ref([])
     const searchQuery = ref('')
 
     // Modal state
@@ -113,6 +111,24 @@ export default {
 
     // Use shared filters
     const { selectedLocation, selectedCategory, getCurrentFilters } = useFilters()
+
+    // Inventory doesn't support month/status filters, only warehouse and category.
+    const { data: items, loading, error } = useFilteredResource(
+      async () => {
+        const filters = getCurrentFilters()
+        try {
+          return await api.getInventory({
+            warehouse: filters.warehouse,
+            category: filters.category
+          })
+        } catch (err) {
+          // Preserve original error-string shape surfaced to the template.
+          throw 'Failed to load inventory: ' + err.message
+        }
+      },
+      [selectedLocation, selectedCategory],
+      []
+    )
 
     // Stock status order for sorting (using status keys)
     const STATUS_ORDER = { 'lowStock': 0, 'adequate': 1, 'inStock': 2 }
@@ -130,7 +146,7 @@ export default {
 
     // Computed property to filter items by search query and sort by stock status
     const filteredItems = computed(() => {
-      let filtered = items.value
+      let filtered = items.value || []
 
       // Apply search filter if query exists
       if (searchQuery.value.trim()) {
@@ -147,27 +163,6 @@ export default {
         const statusB = getStockStatusKey(b)
         return STATUS_ORDER[statusA] - STATUS_ORDER[statusB]
       })
-    })
-
-    const loadInventory = async () => {
-      try {
-        loading.value = true
-        const filters = getCurrentFilters()
-        // Inventory doesn't support month/status filters, only warehouse and category
-        items.value = await api.getInventory({
-          warehouse: filters.warehouse,
-          category: filters.category
-        })
-      } catch (err) {
-        error.value = 'Failed to load inventory: ' + err.message
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // Watch for filter changes and reload data
-    watch([selectedLocation, selectedCategory], () => {
-      loadInventory()
     })
 
     const getStockStatus = (item) => {
@@ -200,8 +195,6 @@ export default {
       selectedItem.value = item
       showItemModal.value = true
     }
-
-    onMounted(loadInventory)
 
     return {
       t,
