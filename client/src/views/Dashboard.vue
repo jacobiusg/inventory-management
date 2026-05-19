@@ -297,9 +297,10 @@
 </template>
 
 <script>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
+import { useFilteredResource } from '../composables/useFilteredResource'
 import { useI18n } from '../composables/useI18n'
 import { formatCurrency } from '../utils/currency'
 import ProductDetailModal from '../components/ProductDetailModal.vue'
@@ -313,11 +314,6 @@ export default {
   },
   setup() {
     const { t, currentCurrency, translateProductName, translateWarehouse } = useI18n()
-    const loading = ref(true)
-    const error = ref(null)
-    const summary = ref({})
-    const allOrders = ref([])
-    const inventoryItems = ref([])
 
     // Modal state
     const showProductModal = ref(false)
@@ -336,6 +332,43 @@ export default {
       selectedStatus,
       getCurrentFilters
     } = useFilters()
+
+    // Multi-fetch loader: a single resource simplifies the template's combined
+    // loading/error UI and matches the original `loadData` semantics exactly.
+    const { data, loading, error } = useFilteredResource(
+      async () => {
+        const filters = getCurrentFilters()
+        try {
+          const [summaryData, ordersData, inventoryData, backlogData] = await Promise.all([
+            api.getDashboardSummary(filters),
+            api.getOrders(filters),
+            api.getInventory(filters),
+            api.getBacklog()
+          ])
+          return {
+            summary: summaryData,
+            allOrders: ordersData,
+            inventoryItems: inventoryData,
+            allBacklogItems: backlogData
+          }
+        } catch (err) {
+          // Preserve original error-string shape surfaced to the template.
+          throw 'Failed to load dashboard data: ' + err.message
+        }
+      },
+      [selectedPeriod, selectedLocation, selectedCategory, selectedStatus],
+      { summary: {}, allOrders: [], inventoryItems: [], allBacklogItems: [] }
+    )
+
+    // Expose nested data as computed refs so existing template/computed bindings
+    // referencing `summary.value`, `allOrders.value`, etc. keep working.
+    const summary = computed(() => data.value?.summary || {})
+    const allOrders = computed(() => data.value?.allOrders || [])
+    const inventoryItems = computed(() => data.value?.inventoryItems || [])
+    const allBacklogItems = computed(() => data.value?.allBacklogItems || [])
+
+    // Pre-build SKU lookup so topProducts avoids an O(N*M) .find() scan.
+    const inventoryBySku = computed(() => new Map(inventoryItems.value.map(i => [i.sku, i])))
 
     const ordersData = ref({ fulfilled: 187, goal: 200 })
     const fillRate = ref(96.8)
@@ -498,7 +531,7 @@ export default {
 
             // Find matching inventory item to get full product details
             // Note: inventoryItems is also filtered by API based on: warehouse, category
-            const invItem = inventoryItems.value.find(i => i.sku === sku)
+            const invItem = inventoryBySku.value.get(sku)
 
             // Skip products that don't match current inventory filters
             // (e.g., if filtering by warehouse A, don't show products from warehouse B)
@@ -545,8 +578,6 @@ export default {
         .slice(0, 12)
     })
 
-    const allBacklogItems = ref([])
-
     // Filter backlog based on inventory filters
     const backlogItems = computed(() => {
       if (selectedLocation.value === 'all' && selectedCategory.value === 'all') {
@@ -557,29 +588,6 @@ export default {
       const validSkus = new Set(inventoryItems.value.map(item => item.sku))
       return allBacklogItems.value.filter(b => validSkus.has(b.item_sku))
     })
-
-    const loadData = async () => {
-      try {
-        loading.value = true
-        const filters = getCurrentFilters()
-
-        const [summaryData, ordersData, inventoryData, backlogData] = await Promise.all([
-          api.getDashboardSummary(filters),
-          api.getOrders(filters),
-          api.getInventory(filters),
-          api.getBacklog()
-        ])
-
-        summary.value = summaryData
-        allOrders.value = ordersData
-        inventoryItems.value = inventoryData
-        allBacklogItems.value = backlogData
-      } catch (err) {
-        error.value = 'Failed to load dashboard data: ' + err.message
-      } finally {
-        loading.value = false
-      }
-    }
 
     const calculatePercentage = (value, goal) => {
       return ((value / goal) * 100).toFixed(2)
@@ -663,21 +671,15 @@ export default {
     }
 
     const handlePOCreated = (poData) => {
-      // Update the backlog item with the new PO ID
-      const item = allBacklogItems.value.find(b => b.id === poData.backlog_item_id)
+      // Update the backlog item with the new PO ID.
+      // Mutate the item in-place inside data.value so the computed proxy reflects it.
+      const item = (data.value?.allBacklogItems || []).find(b => b.id === poData.backlog_item_id)
       if (item) {
         item.purchase_order_id = poData.id
         item.purchase_order = poData
       }
       showPOModal.value = false
     }
-
-    // Watch for filter changes and reload data
-    watch([selectedPeriod, selectedLocation, selectedCategory, selectedStatus], () => {
-      loadData()
-    })
-
-    onMounted(loadData)
 
     return {
       t,

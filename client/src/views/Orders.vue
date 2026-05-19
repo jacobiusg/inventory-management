@@ -134,9 +134,10 @@
 </template>
 
 <script>
-import { ref, onMounted, watch, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { api } from '../api'
 import { useFilters } from '../composables/useFilters'
+import { useFilteredResource } from '../composables/useFilteredResource'
 import { useI18n } from '../composables/useI18n'
 
 export default {
@@ -147,9 +148,6 @@ export default {
     const currencySymbol = computed(() => {
       return currentCurrency.value === 'JPY' ? '¥' : '$'
     })
-    const loading = ref(true)
-    const error = ref(null)
-    const orders = ref([])
     const submittedOrders = ref([])
 
     // Use shared filters
@@ -161,32 +159,28 @@ export default {
       getCurrentFilters
     } = useFilters()
 
-    const loadOrders = async () => {
-      try {
-        loading.value = true
+    const { data: orders, loading, error } = useFilteredResource(
+      async () => {
         const filters = getCurrentFilters()
-        const fetchedOrders = await api.getOrders(filters)
-
-        // Sort orders by order_date (earliest first)
-        orders.value = fetchedOrders.sort((a, b) => {
-          const dateA = new Date(a.order_date)
-          const dateB = new Date(b.order_date)
-          return dateA - dateB
-        })
-      } catch (err) {
-        error.value = 'Failed to load orders: ' + err.message
-      } finally {
-        loading.value = false
-      }
-    }
-
-    // Watch for filter changes and reload data
-    watch([selectedPeriod, selectedLocation, selectedCategory, selectedStatus], () => {
-      loadOrders()
-    })
+        try {
+          const fetchedOrders = await api.getOrders(filters)
+          // Sort orders by order_date (earliest first)
+          return fetchedOrders.sort((a, b) => {
+            const dateA = new Date(a.order_date)
+            const dateB = new Date(b.order_date)
+            return dateA - dateB
+          })
+        } catch (err) {
+          // Preserve original error-string shape surfaced to the template.
+          throw 'Failed to load orders: ' + err.message
+        }
+      },
+      [selectedPeriod, selectedLocation, selectedCategory, selectedStatus],
+      []
+    )
 
     const getOrdersByStatus = (status) => {
-      return orders.value.filter(order => order.status === status)
+      return (orders.value || []).filter(order => order.status === status)
     }
 
     const getOrderStatusClass = (status) => {
@@ -217,10 +211,7 @@ export default {
       }
     }
 
-    onMounted(() => {
-      loadOrders()
-      loadSubmittedOrders()
-    })
+    onMounted(loadSubmittedOrders)
 
     return {
       t,
