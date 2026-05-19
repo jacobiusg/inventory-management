@@ -74,6 +74,61 @@
           </table>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Submitted Orders ({{ submittedOrders.length }})</h3>
+        </div>
+        <div class="table-container">
+          <table class="po-table">
+            <thead>
+              <tr>
+                <th class="col-po-number">PO Number</th>
+                <th class="col-supplier">Supplier</th>
+                <th class="col-items">Items</th>
+                <th class="col-category">Category</th>
+                <th class="col-value">Total</th>
+                <th class="col-date">Created</th>
+                <th class="col-date">Expected Delivery</th>
+                <th class="col-lead-time">Lead Time</th>
+                <th class="col-status">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="submittedOrders.length === 0">
+                <td colspan="9" style="color: #64748b; text-align: center;">
+                  No submitted orders yet — place one from the Restocking tab.
+                </td>
+              </tr>
+              <tr v-for="po in submittedOrders" :key="po.id">
+                <td class="col-po-number"><strong>{{ po.id }}</strong></td>
+                <td class="col-supplier">{{ po.supplier_name }}</td>
+                <td class="col-items">
+                  <details class="items-details">
+                    <summary class="items-summary">
+                      {{ po.items.length }} item(s)
+                    </summary>
+                    <div class="items-dropdown">
+                      <div v-for="(item, idx) in po.items" :key="idx" class="item-entry">
+                        <span class="item-name">{{ item.name }}</span>
+                        <span class="item-meta">Qty: {{ item.quantity }} @ {{ currencySymbol }}{{ item.unit_cost }}</span>
+                      </div>
+                    </div>
+                  </details>
+                </td>
+                <td class="col-category">{{ po.category }}</td>
+                <td class="col-value"><strong>{{ currencySymbol }}{{ po.total_cost.toLocaleString() }}</strong></td>
+                <td class="col-date">{{ formatDate(po.created_date) }}</td>
+                <td class="col-date">{{ formatDate(po.expected_delivery_date) }}</td>
+                <td class="col-lead-time">{{ po.lead_time_days }} days</td>
+                <td class="col-status">
+                  <span class="badge info">{{ po.status }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -95,6 +150,7 @@ export default {
     const loading = ref(true)
     const error = ref(null)
     const orders = ref([])
+    const submittedOrders = ref([])
 
     // Use shared filters
     const {
@@ -153,13 +209,25 @@ export default {
       })
     }
 
-    onMounted(loadOrders)
+    const loadSubmittedOrders = async () => {
+      try {
+        submittedOrders.value = await api.getSubmittedPurchaseOrders()
+      } catch (err) {
+        console.error('Failed to load submitted purchase orders:', err)
+      }
+    }
+
+    onMounted(() => {
+      loadOrders()
+      loadSubmittedOrders()
+    })
 
     return {
       t,
       loading,
       error,
       orders,
+      submittedOrders,
       getOrdersByStatus,
       getOrderStatusClass,
       formatDate,
@@ -173,9 +241,26 @@ export default {
 
 <style scoped>
 /* Fixed table layout to prevent column shifting */
-.orders-table {
+.orders-table,
+.po-table {
   table-layout: fixed;
   width: 100%;
+}
+
+.col-po-number {
+  width: 130px;
+}
+
+.col-supplier {
+  width: 160px;
+}
+
+.col-category {
+  width: 130px;
+}
+
+.col-lead-time {
+  width: 110px;
 }
 
 /* Column widths */

@@ -5,7 +5,9 @@
       "command": "npx",
       "args": [
         "-y",
-        "@playwright/mcp@0.0.37"
+        "@playwright/mcp@0.0.37",
+        "--config",
+        "/home/jacobiusg/git/inventory-management/.playwright-mcp.config.json"
       ],
       "env": {}
     },
